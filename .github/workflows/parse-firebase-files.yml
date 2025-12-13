@@ -1,9 +1,9 @@
 name: Parse Firebase Storage Files
 
 on:
-  # Run every 15 minutes
+  # Run every hour
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '0 * * * *'
   # Allow manual triggers from GitHub UI
   workflow_dispatch:
     inputs:
