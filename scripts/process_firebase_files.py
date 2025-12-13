@@ -6,7 +6,7 @@ and uploads the parsed results back to Firebase Storage.
 
 Expected Firebase Storage structure:
   Input:  recordings/$uid/$uid-yyyymmdd.csv
-  Output: parsed/$uid/$uid-yyyymmdd.parsed.csv
+  Output: parsed/$uid/$uid-yyyymmdd_parsed.csv
 
 Environment variables required:
   FIREBASE_CREDENTIALS: JSON string of Firebase service account credentials
@@ -53,16 +53,16 @@ def get_unparsed_files(bucket, input_prefix: str, output_prefix: str) -> list:
     in output_prefix.
 
     Input structure:  recordings/$uid/$uid-yyyymmdd.csv
-    Output structure: parsed/$uid/$uid-yyyymmdd.parsed.csv
+    Output structure: parsed/$uid/$uid-yyyymmdd_parsed.csv
     """
     input_blobs = list(bucket.list_blobs(prefix=input_prefix))
 
-    # Build set of already-parsed files (relative path without .parsed suffix)
-    # e.g., "parsed/abc123/abc123-20241201.parsed.csv" -> "abc123/abc123-20241201"
+    # Build set of already-parsed files (relative path without _parsed suffix)
+    # e.g., "parsed/abc123/abc123-20241201_parsed.csv" -> "abc123/abc123-20241201"
     output_blobs = set()
     for blob in bucket.list_blobs(prefix=output_prefix):
         relative = blob.name[len(output_prefix):]  # Remove "parsed/" prefix
-        # Remove .parsed.csv or .parsed.jsonl suffix
+        # Remove _parsed.csv or _parsed.jsonl suffix
         if "_parsed." in relative:
             base = relative.rsplit("_parsed.", 1)[0]
             output_blobs.add(base)
@@ -95,7 +95,7 @@ def process_file(
     Returns True if successful, False otherwise.
 
     Preserves folder structure:
-      recordings/$uid/$uid-yyyymmdd.csv -> parsed/$uid/$uid-yyyymmdd.parsed.csv
+      recordings/$uid/$uid-yyyymmdd.csv -> parsed/$uid/$uid-yyyymmdd_parsed.csv
     """
     input_path = temp_dir / "input.csv"
     extension = "csv" if output_format == "csv" else "jsonl"
@@ -121,10 +121,10 @@ def process_file(
         return False
 
     # Determine output blob name, preserving $uid folder structure
-    # e.g., recordings/abc123/abc123-20241201.csv -> parsed/abc123/abc123-20241201.parsed.csv
+    # e.g., recordings/abc123/abc123-20241201.csv -> parsed/abc123/abc123-20241201_parsed.csv
     relative_path = blob.name[len(input_prefix):]  # $uid/$uid-yyyymmdd.csv
     base_path = relative_path.rsplit(".", 1)[0]     # $uid/$uid-yyyymmdd
-    output_blob_name = f"{output_prefix}{base_path}.parsed.{extension}"
+    output_blob_name = f"{output_prefix}{base_path}_parsed.{extension}"
 
     # Upload the parsed file
     print(f"  Uploading to: {output_blob_name}")
