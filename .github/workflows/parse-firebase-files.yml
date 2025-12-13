@@ -38,7 +38,5 @@ jobs:
         env:
           FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
           FIREBASE_BUCKET: ${{ secrets.FIREBASE_BUCKET }}
-          INPUT_PREFIX: ${{ vars.INPUT_PREFIX || 'raw/' }}
-          OUTPUT_PREFIX: ${{ vars.OUTPUT_PREFIX || 'parsed/' }}
           OUTPUT_FORMAT: ${{ inputs.output_format || 'csv' }}
         run: python scripts/process_firebase_files.py
