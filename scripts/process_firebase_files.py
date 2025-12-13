@@ -126,10 +126,11 @@ def process_file(
     base_path = relative_path.rsplit(".", 1)[0]     # $uid/$uid-yyyymmdd
     output_blob_name = f"{output_prefix}{base_path}_parsed.{extension}"
 
-    # Upload the parsed file
+    # Upload the parsed file with proper content type
     print(f"  Uploading to: {output_blob_name}")
+    content_type = "text/csv" if output_format == "csv" else "application/x-ndjson"
     output_blob = bucket.blob(output_blob_name)
-    output_blob.upload_from_filename(str(output_path))
+    output_blob.upload_from_filename(str(output_path), content_type=content_type)
 
     print(f"  Done!")
     return True
