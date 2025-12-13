@@ -1,10 +1,6 @@
-#!/usr/bin/env python3
 """
-Parse the payload column in `sample.csv` according to the format documented in
-`Raw data format.md` and emit normalized records (CSV by default).
-
 Usage:
-  python parse_payload.py               # reads ./sample.csv, writes CSV to stdout
+  python parse_payload.py
   python parse_payload.py input.csv -o parsed.csv
   python parse_payload.py input.csv -o parsed.jsonl --format jsonl
 """
@@ -23,7 +19,6 @@ _FLOAT_PATTERN = re.compile(r"^[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?$")
 
 
 def _coerce_number(value: str):
-    """Convert a string to int/float when possible, otherwise return the stripped string."""
     text = value.strip()
     if text == "":
         return None
@@ -41,12 +36,6 @@ def _coerce_number(value: str):
 
 
 def parse_payload_block(block: str) -> Iterable[Dict]:
-    """
-    Parse a payload field (potentially containing multiple lines) into structured rows.
-
-    Each payload line follows:
-    EMOTIBIT_TIMESTAMP,PACKET#,NUM_DATAPOINTS,TYPETAG,VERSION,RELIABILITY,PAYLOAD...
-    """
     for raw_line in block.splitlines():
         line = raw_line.strip()
         if not line:
@@ -69,7 +58,6 @@ def parse_payload_block(block: str) -> Iterable[Dict]:
 
 
 def parse_file(path: Path) -> Iterable[Dict]:
-    """Yield normalized records for every payload line in the CSV file."""
     with path.open(newline="") as csvfile:
         reader = csv.DictReader(csvfile)
         for row_number, row in enumerate(reader, start=2):  # account for header line
@@ -89,10 +77,6 @@ def parse_file(path: Path) -> Iterable[Dict]:
 
 
 def serialize_payload(values: List) -> str:
-    """
-    Represent the payload list as a JSON string to preserve string typing even for
-    numeric-looking values in CSV output.
-    """
     return json.dumps([str(v) for v in values], ensure_ascii=True, separators=(",", ":"))
 
 
@@ -179,7 +163,6 @@ def main() -> None:
     finally:
         if needs_close:
             output_stream.close()
-
 
 if __name__ == "__main__":
     main()

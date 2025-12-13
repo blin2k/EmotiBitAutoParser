@@ -1,0 +1,44 @@
+name: Parse Firebase Storage Files
+
+on:
+  # Run every 15 minutes
+  schedule:
+    - cron: '*/15 * * * *'
+  # Allow manual triggers from GitHub UI
+  workflow_dispatch:
+    inputs:
+      output_format:
+        description: 'Output format (csv or jsonl)'
+        required: false
+        default: 'csv'
+        type: choice
+        options:
+          - csv
+          - jsonl
+
+jobs:
+  parse-files:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Process unparsed Firebase files
+        env:
+          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS }}
+          FIREBASE_BUCKET: ${{ secrets.FIREBASE_BUCKET }}
+          INPUT_PREFIX: ${{ vars.INPUT_PREFIX || 'raw/' }}
+          OUTPUT_PREFIX: ${{ vars.OUTPUT_PREFIX || 'parsed/' }}
+          OUTPUT_FORMAT: ${{ inputs.output_format || 'csv' }}
+        run: python scripts/process_firebase_files.py
