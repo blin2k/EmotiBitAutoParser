@@ -63,8 +63,8 @@ def get_unparsed_files(bucket, input_prefix: str, output_prefix: str) -> list:
     for blob in bucket.list_blobs(prefix=output_prefix):
         relative = blob.name[len(output_prefix):]  # Remove "parsed/" prefix
         # Remove .parsed.csv or .parsed.jsonl suffix
-        if ".parsed." in relative:
-            base = relative.rsplit(".parsed.", 1)[0]
+        if "_parsed." in relative:
+            base = relative.rsplit("_parsed.", 1)[0]
             output_blobs.add(base)
 
     unparsed = []
