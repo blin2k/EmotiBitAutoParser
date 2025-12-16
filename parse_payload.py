@@ -46,12 +46,8 @@ def parse_payload_block(block: str) -> Iterable[Dict]:
                 f"Payload line has {len(parts)} columns (<7 expected): {raw_line!r}"
             )
         yield {
-            "emotibit_timestamp": _coerce_number(parts[0]),
             "packet": _coerce_number(parts[1]),
-            "num_datapoints": _coerce_number(parts[2]),
-            "type_tag": parts[3],
-            "version": _coerce_number(parts[4]),
-            "reliability": _coerce_number(parts[5]),
+            "type_tag": parts[3],  # Kept for grouping, excluded from CSV output
             # Keep payload entries as strings to avoid mixed numeric/string types.
             "payload": [v.strip() for v in parts[6:] if v.strip() != ""],
         }
@@ -70,8 +66,6 @@ def parse_file(path: Path) -> Iterable[Dict]:
                     "timestamp_epoch_ms": _coerce_number(
                         row.get("timestamp_epoch_ms", "")
                     ),
-                    "remote_ip": row.get("remote_ip"),
-                    "remote_port": _coerce_number(row.get("remote_port", "")),
                     **payload_row,
                 }
 
@@ -83,14 +77,7 @@ def serialize_payload(values: List) -> str:
 FIELDNAMES = [
     "timestamp_iso8601",
     "timestamp_epoch_ms",
-    "remote_ip",
-    "remote_port",
-    "emotibit_timestamp",
     "packet",
-    "num_datapoints",
-    "type_tag",
-    "version",
-    "reliability",
     "payload",
 ]
 
@@ -101,7 +88,7 @@ def write_jsonl(records: Iterable[Dict], stream: TextIO) -> None:
 
 
 def write_csv(records: Iterable[Dict], stream: TextIO) -> None:
-    writer = csv.DictWriter(stream, fieldnames=FIELDNAMES)
+    writer = csv.DictWriter(stream, fieldnames=FIELDNAMES, extrasaction="ignore")
     writer.writeheader()
     for record in records:
         row = dict(record)
