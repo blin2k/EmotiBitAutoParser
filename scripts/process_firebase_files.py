@@ -6,7 +6,7 @@ and uploads the parsed results back to Firebase Storage.
 
 Expected Firebase Storage structure:
   Input:  recordings/$uid/$uid-yyyymmdd.csv
-  Output: parsed/$uid/$uid-yyyymmdd_parsed.csv
+  Output: parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
 
 Environment variables required:
   FIREBASE_CREDENTIALS: JSON string of Firebase service account credentials
@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import tempfile
+from collections import defaultdict
 from pathlib import Path
 
 import firebase_admin
@@ -53,19 +54,26 @@ def get_unparsed_files(bucket, input_prefix: str, output_prefix: str) -> list:
     in output_prefix.
 
     Input structure:  recordings/$uid/$uid-yyyymmdd.csv
-    Output structure: parsed/$uid/$uid-yyyymmdd_parsed.csv
+    Output structure: parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
     """
     input_blobs = list(bucket.list_blobs(prefix=input_prefix))
 
-    # Build set of already-parsed files (relative path without _parsed suffix)
-    # e.g., "parsed/abc123/abc123-20241201_parsed.csv" -> "abc123/abc123-20241201"
+    # Build set of already-parsed files by checking for marker files
+    # We check if any type_tag subfolder exists for a given uid/date combination
+    # e.g., "parsed/abc123/HR/abc123_20241201_HR.csv" means abc123-20241201 is parsed
     output_blobs = set()
     for blob in bucket.list_blobs(prefix=output_prefix):
-        relative = blob.name[len(output_prefix):]  # Remove "parsed/" prefix
-        # Remove _parsed.csv or _parsed.jsonl suffix
-        if "_parsed." in relative:
-            base = relative.rsplit("_parsed.", 1)[0]
-            output_blobs.add(base)
+        # Extract uid and date from path like: parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
+        parts = blob.name[len(output_prefix):].split("/")
+        if len(parts) >= 3:
+            uid = parts[0]
+            filename = parts[2]
+            # Extract date from filename like: uid_yyyymmdd_typetag.csv
+            # Split by _ to get [uid, yyyymmdd, typetag.csv]
+            filename_parts = filename.split("_")
+            if len(filename_parts) >= 2:
+                date_part = filename_parts[1]  # Get yyyymmdd
+                output_blobs.add(f"{uid}/{uid}-{date_part}")
 
     unparsed = []
     for blob in input_blobs:
@@ -91,15 +99,14 @@ def process_file(
     blob, bucket, input_prefix: str, output_prefix: str, output_format: str, temp_dir: Path
 ) -> bool:
     """
-    Download a file, parse it, and upload the result.
+    Download a file, parse it, and upload separate files per type_tag.
     Returns True if successful, False otherwise.
 
-    Preserves folder structure:
-      recordings/$uid/$uid-yyyymmdd.csv -> parsed/$uid/$uid-yyyymmdd_parsed.csv
+    Output structure:
+      recordings/$uid/$uid-yyyymmdd.csv -> parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
     """
     input_path = temp_dir / "input.csv"
     extension = "csv" if output_format == "csv" else "jsonl"
-    output_path = temp_dir / f"output.{extension}"
 
     print(f"Processing: {blob.name}")
 
@@ -107,32 +114,51 @@ def process_file(
     print(f"  Downloading...")
     blob.download_to_filename(str(input_path))
 
-    # Parse the file
-    print(f"  Parsing...")
+    # Extract uid and date from blob name
+    # e.g., recordings/abc123/abc123-20241201.csv -> uid=abc123, date=20241201
+    relative_path = blob.name[len(input_prefix):]  # $uid/$uid-yyyymmdd.csv
+    path_parts = relative_path.split("/")
+    uid = path_parts[0]
+    filename = path_parts[-1]  # $uid-yyyymmdd.csv
+    date_part = filename.rsplit("-", 1)[-1].split(".")[0]  # yyyymmdd
+
+    # Parse the file and group records by type_tag
+    print(f"  Parsing and grouping by type_tag...")
     try:
-        records = parse_payload.parse_file(input_path)
-        with output_path.open("w", encoding="utf-8", newline="" if output_format == "csv" else None) as f:
-            if output_format == "jsonl":
-                parse_payload.write_jsonl(records, f)
-            else:
-                parse_payload.write_csv(records, f)
+        records_by_tag = defaultdict(list)
+        for record in parse_payload.parse_file(input_path):
+            type_tag = record.get("type_tag", "UNKNOWN")
+            records_by_tag[type_tag].append(record)
     except Exception as e:
         print(f"  ERROR parsing: {e}")
         return False
 
-    # Determine output blob name, preserving $uid folder structure
-    # e.g., recordings/abc123/abc123-20241201.csv -> parsed/abc123/abc123-20241201_parsed.csv
-    relative_path = blob.name[len(input_prefix):]  # $uid/$uid-yyyymmdd.csv
-    base_path = relative_path.rsplit(".", 1)[0]     # $uid/$uid-yyyymmdd
-    output_blob_name = f"{output_prefix}{base_path}_parsed.{extension}"
+    if not records_by_tag:
+        print(f"  No records found")
+        return True
 
-    # Upload the parsed file with proper content type
-    print(f"  Uploading to: {output_blob_name}")
+    # Upload a separate file for each type_tag
     content_type = "text/csv" if output_format == "csv" else "application/x-ndjson"
-    output_blob = bucket.blob(output_blob_name)
-    output_blob.upload_from_filename(str(output_path), content_type=content_type)
+    upload_count = 0
 
-    print(f"  Done!")
+    for type_tag, records in records_by_tag.items():
+        output_path = temp_dir / f"output_{type_tag}.{extension}"
+
+        # Write records for this type_tag
+        with output_path.open("w", encoding="utf-8", newline="" if output_format == "csv" else None) as f:
+            if output_format == "jsonl":
+                parse_payload.write_jsonl(iter(records), f)
+            else:
+                parse_payload.write_csv(iter(records), f)
+
+        # Upload: parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
+        output_blob_name = f"{output_prefix}{uid}/{type_tag}/{uid}_{date_part}_{type_tag}.{extension}"
+        print(f"  Uploading: {output_blob_name} ({len(records)} records)")
+        output_blob = bucket.blob(output_blob_name)
+        output_blob.upload_from_filename(str(output_path), content_type=content_type)
+        upload_count += 1
+
+    print(f"  Done! Uploaded {upload_count} files for {len(records_by_tag)} type tags")
     return True
 
 
