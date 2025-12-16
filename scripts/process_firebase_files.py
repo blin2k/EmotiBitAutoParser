@@ -6,7 +6,9 @@ and uploads the parsed results back to Firebase Storage.
 
 Expected Firebase Storage structure:
   Input:  recordings/$uid/$uid-yyyymmdd.csv
+          recordings/$uid/$uid-yyyymmdd-location.csv
   Output: parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
+          parsed/$uid/location/$uid_$yyyymmdd_location.csv (moved, not parsed)
 
 Environment variables required:
   FIREBASE_CREDENTIALS: JSON string of Firebase service account credentials
@@ -48,34 +50,47 @@ def init_firebase() -> storage.bucket:
     return storage.bucket()
 
 
-def get_unparsed_files(bucket, input_prefix: str, output_prefix: str) -> list:
+def get_unparsed_files(bucket, input_prefix: str, output_prefix: str) -> tuple:
     """
     List files in input_prefix that don't have a corresponding parsed file
     in output_prefix.
 
     Input structure:  recordings/$uid/$uid-yyyymmdd.csv
+                      recordings/$uid/$uid-yyyymmdd-location.csv
     Output structure: parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
+                      parsed/$uid/location/$uid_$yyyymmdd_location.csv
+
+    Returns:
+        tuple: (data_files, location_files) - lists of blobs to process
     """
     input_blobs = list(bucket.list_blobs(prefix=input_prefix))
 
-    # Build set of already-parsed files by checking for marker files
-    # We check if any type_tag subfolder exists for a given uid/date combination
+    # Build set of already-parsed data files
     # e.g., "parsed/abc123/HR/abc123_20241201_HR.csv" means abc123-20241201 is parsed
-    output_blobs = set()
+    parsed_data = set()
+    # Build set of already-moved location files
+    # e.g., "parsed/abc123/location/abc123_20241201_location.csv"
+    parsed_location = set()
+
     for blob in bucket.list_blobs(prefix=output_prefix):
-        # Extract uid and date from path like: parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
         parts = blob.name[len(output_prefix):].split("/")
         if len(parts) >= 3:
             uid = parts[0]
+            tag_folder = parts[1]
             filename = parts[2]
-            # Extract date from filename like: uid_yyyymmdd_typetag.csv
-            # Split by _ to get [uid, yyyymmdd, typetag.csv]
             filename_parts = filename.split("_")
             if len(filename_parts) >= 2:
-                date_part = filename_parts[1]  # Get yyyymmdd
-                output_blobs.add(f"{uid}/{uid}-{date_part}")
+                date_part = filename_parts[1]
+                if tag_folder == "location":
+                    # Location file: parsed/$uid/location/$uid_yyyymmdd_location.csv
+                    parsed_location.add(f"{uid}/{uid}-{date_part}-location")
+                else:
+                    # Data file: parsed/$uid/$type_tag/$uid_yyyymmdd_$type_tag.csv
+                    parsed_data.add(f"{uid}/{uid}-{date_part}")
 
-    unparsed = []
+    data_files = []
+    location_files = []
+
     for blob in input_blobs:
         # Skip "directories" (empty blobs ending with /)
         if blob.name.endswith("/"):
@@ -84,15 +99,59 @@ def get_unparsed_files(bucket, input_prefix: str, output_prefix: str) -> list:
         if not blob.name.lower().endswith(".csv"):
             continue
 
-        # Get path relative to input prefix: $uid/$uid-yyyymmdd.csv
+        # Get path relative to input prefix: $uid/$uid-yyyymmdd.csv or $uid/$uid-yyyymmdd-location.csv
         relative_path = blob.name[len(input_prefix):]
-        # Remove .csv extension: $uid/$uid-yyyymmdd
+        # Remove .csv extension
         base_path = relative_path.rsplit(".", 1)[0]
 
-        if base_path not in output_blobs:
-            unparsed.append(blob)
+        if base_path.endswith("-location"):
+            # Location file
+            if base_path not in parsed_location:
+                location_files.append(blob)
+        else:
+            # Data file
+            if base_path not in parsed_data:
+                data_files.append(blob)
 
-    return unparsed
+    return data_files, location_files
+
+
+def move_location_file(
+    blob, bucket, input_prefix: str, output_prefix: str, temp_dir: Path
+) -> bool:
+    """
+    Move a location file without parsing.
+    Returns True if successful, False otherwise.
+
+    Output structure:
+      recordings/$uid/$uid-yyyymmdd-location.csv -> parsed/$uid/location/$uid_$yyyymmdd_location.csv
+    """
+    temp_path = temp_dir / "location.csv"
+
+    print(f"Moving location file: {blob.name}")
+
+    # Download the file
+    print(f"  Downloading...")
+    blob.download_to_filename(str(temp_path))
+
+    # Extract uid and date from blob name
+    # e.g., recordings/abc123/abc123-20241201-location.csv -> uid=abc123, date=20241201
+    relative_path = blob.name[len(input_prefix):]  # $uid/$uid-yyyymmdd-location.csv
+    path_parts = relative_path.split("/")
+    uid = path_parts[0]
+    filename = path_parts[-1]  # $uid-yyyymmdd-location.csv
+    # Remove -location.csv suffix, then get date
+    base_name = filename.rsplit("-location", 1)[0]  # $uid-yyyymmdd
+    date_part = base_name.rsplit("-", 1)[-1]  # yyyymmdd
+
+    # Upload: parsed/$uid/location/$uid_$yyyymmdd_location.csv
+    output_blob_name = f"{output_prefix}{uid}/location/{uid}_{date_part}_location.csv"
+    print(f"  Uploading to: {output_blob_name}")
+    output_blob = bucket.blob(output_blob_name)
+    output_blob.upload_from_filename(str(temp_path), content_type="text/csv")
+
+    print(f"  Done!")
+    return True
 
 
 def process_file(
@@ -175,21 +234,30 @@ def main() -> int:
     bucket = init_firebase()
 
     print(f"Looking for unparsed files in '{input_prefix}'...")
-    unparsed_files = get_unparsed_files(bucket, input_prefix, output_prefix)
+    data_files, location_files = get_unparsed_files(bucket, input_prefix, output_prefix)
 
-    if not unparsed_files:
+    if not data_files and not location_files:
         print("No unparsed files found.")
         return 0
 
-    print(f"Found {len(unparsed_files)} unparsed file(s).")
+    print(f"Found {len(data_files)} data file(s) and {len(location_files)} location file(s).")
 
     success_count = 0
     error_count = 0
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        for blob in unparsed_files:
+
+        # Process data files (parse and split by type_tag)
+        for blob in data_files:
             if process_file(blob, bucket, input_prefix, output_prefix, output_format, temp_path):
+                success_count += 1
+            else:
+                error_count += 1
+
+        # Move location files (no parsing)
+        for blob in location_files:
+            if move_location_file(blob, bucket, input_prefix, output_prefix, temp_path):
                 success_count += 1
             else:
                 error_count += 1
