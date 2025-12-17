@@ -7,8 +7,7 @@ and uploads the parsed results back to Firebase Storage.
 Expected Firebase Storage structure:
   Input:  recordings/$uid/$uid-yyyymmdd.csv
           recordings/$uid/$uid-yyyymmdd-location.csv
-  Output: parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
-          parsed/$uid/location/$uid_$yyyymmdd_location.csv (moved, not parsed)
+  Output: parsed/$uid/$type_tag/$yyyymmdd.csv (type_tag includes "location")
 
 Environment variables required:
   FIREBASE_CREDENTIALS: JSON string of Firebase service account credentials
@@ -57,19 +56,17 @@ def get_unparsed_files(bucket, input_prefix: str, output_prefix: str) -> tuple:
 
     Input structure:  recordings/$uid/$uid-yyyymmdd.csv
                       recordings/$uid/$uid-yyyymmdd-location.csv
-    Output structure: parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
-                      parsed/$uid/location/$uid_$yyyymmdd_location.csv
+    Output structure: parsed/$uid/$type_tag/$yyyymmdd.csv (location is a type_tag)
 
     Returns:
         tuple: (data_files, location_files) - lists of blobs to process
     """
     input_blobs = list(bucket.list_blobs(prefix=input_prefix))
 
-    # Build set of already-parsed data files
-    # e.g., "parsed/abc123/HR/abc123_20241201_HR.csv" means abc123-20241201 is parsed
+    # Build set of already-parsed files
+    # e.g., "parsed/abc123/HR/20241201.csv" means abc123-20241201 HR data is parsed
+    # e.g., "parsed/abc123/location/20241201.csv" means abc123-20241201 location is parsed
     parsed_data = set()
-    # Build set of already-moved location files
-    # e.g., "parsed/abc123/location/abc123_20241201_location.csv"
     parsed_location = set()
 
     for blob in bucket.list_blobs(prefix=output_prefix):
@@ -78,15 +75,12 @@ def get_unparsed_files(bucket, input_prefix: str, output_prefix: str) -> tuple:
             uid = parts[0]
             tag_folder = parts[1]
             filename = parts[2]
-            filename_parts = filename.split("_")
-            if len(filename_parts) >= 2:
-                date_part = filename_parts[1]
-                if tag_folder == "location":
-                    # Location file: parsed/$uid/location/$uid_yyyymmdd_location.csv
-                    parsed_location.add(f"{uid}/{uid}-{date_part}-location")
-                else:
-                    # Data file: parsed/$uid/$type_tag/$uid_yyyymmdd_$type_tag.csv
-                    parsed_data.add(f"{uid}/{uid}-{date_part}")
+            # Filename is now just yyyymmdd.csv
+            date_part = filename.split(".")[0]
+            if tag_folder == "location":
+                parsed_location.add(f"{uid}/{uid}-{date_part}-location")
+            else:
+                parsed_data.add(f"{uid}/{uid}-{date_part}")
 
     data_files = []
     location_files = []
@@ -124,7 +118,7 @@ def move_location_file(
     Returns True if successful, False otherwise.
 
     Output structure:
-      recordings/$uid/$uid-yyyymmdd-location.csv -> parsed/$uid/location/$uid_$yyyymmdd_location.csv
+      recordings/$uid/$uid-yyyymmdd-location.csv -> parsed/$uid/location/$yyyymmdd.csv
     """
     temp_path = temp_dir / "location.csv"
 
@@ -144,8 +138,8 @@ def move_location_file(
     base_name = filename.rsplit("-location", 1)[0]  # $uid-yyyymmdd
     date_part = base_name.rsplit("-", 1)[-1]  # yyyymmdd
 
-    # Upload: parsed/$uid/location/$uid_$yyyymmdd_location.csv
-    output_blob_name = f"{output_prefix}{uid}/location/{uid}_{date_part}_location.csv"
+    # Upload: parsed/$uid/location/$yyyymmdd.csv
+    output_blob_name = f"{output_prefix}{uid}/location/{date_part}.csv"
     print(f"  Uploading to: {output_blob_name}")
     output_blob = bucket.blob(output_blob_name)
     output_blob.upload_from_filename(str(temp_path), content_type="text/csv")
@@ -162,7 +156,7 @@ def process_file(
     Returns True if successful, False otherwise.
 
     Output structure:
-      recordings/$uid/$uid-yyyymmdd.csv -> parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
+      recordings/$uid/$uid-yyyymmdd.csv -> parsed/$uid/$type_tag/$yyyymmdd.csv
     """
     input_path = temp_dir / "input.csv"
     extension = "csv" if output_format == "csv" else "jsonl"
@@ -210,8 +204,8 @@ def process_file(
             else:
                 parse_payload.write_csv(iter(records), f)
 
-        # Upload: parsed/$uid/$type_tag/$uid_$yyyymmdd_$type_tag.csv
-        output_blob_name = f"{output_prefix}{uid}/{type_tag}/{uid}_{date_part}_{type_tag}.{extension}"
+        # Upload: parsed/$uid/$type_tag/$yyyymmdd.csv
+        output_blob_name = f"{output_prefix}{uid}/{type_tag}/{date_part}.{extension}"
         print(f"  Uploading: {output_blob_name} ({len(records)} records)")
         output_blob = bucket.blob(output_blob_name)
         output_blob.upload_from_filename(str(output_path), content_type=content_type)
