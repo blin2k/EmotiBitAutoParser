@@ -1,2 +1,4 @@
-*.md
+// *.md
 *.csv
+.env
+downloads/
