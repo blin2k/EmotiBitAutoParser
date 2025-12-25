@@ -17,6 +17,7 @@ Optional environment variables:
   OUTPUT_FORMAT: Output format - "csv" or "jsonl" (default: "csv")
 """
 
+import csv
 import json
 import os
 import sys
@@ -31,6 +32,82 @@ from firebase_admin import credentials, storage
 # Add parent directory to path so we can import parse_payload
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import parse_payload
+
+from datetime import datetime, timezone
+
+
+def expand_payload_records(records: list) -> list:
+    """
+    Expand records with multiple payload values into separate rows.
+    Uses interpolation to estimate timestamps for each value.
+
+    For example, if a record has payload ["0.223", "0.224", "0.224"] and the next
+    record is 24ms later, each value gets a timestamp 8ms apart.
+
+    Args:
+        records: List of parsed records (must be sorted by timestamp)
+
+    Returns:
+        List of expanded records, each with a single payload value
+    """
+    if not records:
+        return []
+
+    expanded = []
+
+    for i, record in enumerate(records):
+        payload = record.get("payload", [])
+        if not payload:
+            continue
+
+        num_values = len(payload)
+        current_ts_ms = record.get("timestamp_epoch_ms")
+        current_ts_iso = record.get("timestamp_iso8601")
+        packet = record.get("packet")
+
+        if num_values == 1:
+            # Single value, no expansion needed
+            expanded.append({
+                "timestamp_iso8601": current_ts_iso,
+                "timestamp_epoch_ms": current_ts_ms,
+                "packet": packet,
+                "payload": payload[0],
+            })
+            continue
+
+        # Calculate interval between this record and the next
+        if i + 1 < len(records):
+            next_ts_ms = records[i + 1].get("timestamp_epoch_ms")
+            if current_ts_ms is not None and next_ts_ms is not None:
+                total_interval = next_ts_ms - current_ts_ms
+                interval_per_value = total_interval / num_values
+            else:
+                # Default to 8ms if timestamps are missing
+                interval_per_value = 8.0
+        else:
+            # Last record - estimate based on typical sampling rate
+            # Default to 8ms per value (125 Hz)
+            interval_per_value = 8.0
+
+        # Expand each payload value into its own row
+        for j, value in enumerate(payload):
+            if current_ts_ms is not None:
+                interpolated_ts_ms = current_ts_ms + (j * interval_per_value)
+                # Convert to ISO8601
+                dt = datetime.fromtimestamp(interpolated_ts_ms / 1000.0, tz=timezone.utc)
+                interpolated_ts_iso = dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(interpolated_ts_ms % 1000):03d}Z"
+            else:
+                interpolated_ts_ms = None
+                interpolated_ts_iso = current_ts_iso
+
+            expanded.append({
+                "timestamp_iso8601": interpolated_ts_iso,
+                "timestamp_epoch_ms": interpolated_ts_ms,
+                "packet": packet,
+                "payload": value,
+            })
+
+    return expanded
 
 
 def init_firebase() -> storage.bucket:
@@ -194,19 +271,28 @@ def process_file(
     content_type = "text/csv" if output_format == "csv" else "application/x-ndjson"
     upload_count = 0
 
+    # Fieldnames for expanded records (payload is now a single value, not a list)
+    expanded_fieldnames = ["timestamp_iso8601", "timestamp_epoch_ms", "packet", "payload"]
+
     for type_tag, records in records_by_tag.items():
         output_path = temp_dir / f"output_{type_tag}.{extension}"
+
+        # Expand payload records (split multi-value payloads into separate rows)
+        expanded_records = expand_payload_records(records)
 
         # Write records for this type_tag
         with output_path.open("w", encoding="utf-8", newline="" if output_format == "csv" else None) as f:
             if output_format == "jsonl":
-                parse_payload.write_jsonl(iter(records), f)
+                for record in expanded_records:
+                    f.write(json.dumps(record, ensure_ascii=True) + "\n")
             else:
-                parse_payload.write_csv(iter(records), f)
+                writer = csv.DictWriter(f, fieldnames=expanded_fieldnames)
+                writer.writeheader()
+                writer.writerows(expanded_records)
 
         # Upload: parsed/$uid/$type_tag/$yyyymmdd.csv
         output_blob_name = f"{output_prefix}{uid}/{type_tag}/{date_part}.{extension}"
-        print(f"  Uploading: {output_blob_name} ({len(records)} records)")
+        print(f"  Uploading: {output_blob_name} ({len(expanded_records)} rows from {len(records)} records)")
         output_blob = bucket.blob(output_blob_name)
         output_blob.upload_from_filename(str(output_path), content_type=content_type)
         upload_count += 1
